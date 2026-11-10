@@ -1,0 +1,7 @@
+.{
+    .name = .rc_scm,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{""},
+    .fingerprint = 0x91b0ec88ad307673,
+}
