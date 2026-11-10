@@ -20,6 +20,7 @@ pub fn main(init: std.process.Init) !void {
 pub const Token = union(enum) {
     lparen,
     rparen,
+    dot,
     identifier: []const u8,
     integer: i64,
     eof,
@@ -28,6 +29,7 @@ pub const Token = union(enum) {
         switch (self) {
             .lparen => try writer.writeAll("lparen"),
             .rparen => try writer.writeAll("rparen"),
+            .dot => try writer.writeAll("dot"),
             .identifier => try writer.print("(identifier {s})", .{self.identifier}),
             .integer => try writer.print("(integer {d})", .{self.integer}),
             .eof => try writer.writeAll("eof"),
@@ -69,6 +71,7 @@ pub const Value = union(enum) {
             else => {
                 try writer.writeAll(" . ");
                 try self.format(writer);
+                try writer.writeByte(')');
             },
         }
     }
@@ -89,14 +92,15 @@ pub const Scanner = struct {
 
     const ident_initial = letter.orOp(special_initial);
     const ident_subsequent = ident_initial.orOp(digit).orOp(special_subsequent);
+    const sign_subsequent = ident_initial.orOp(explicit_sign).orOp(.fromStr("@"));
 
     const letter = CharMask.fromFn(std.ascii.isAlphabetic);
     const digit = CharMask.fromFn(std.ascii.isDigit);
     const hex_digit = CharMask.fromFn(std.ascii.isHex);
     const whitespace = CharMask.fromStr(&std.ascii.whitespace);
-    const delimiter = whitespace.orOp(CharMask.fromStr("()"));
+    const delimiter = whitespace.orOp(.fromStr("()"));
     const special_initial = CharMask.fromStr("!$%&*/:<=>?@^_~");
-    const special_subsequent = explicit_sign.orOp(CharMask.fromStr(".@"));
+    const special_subsequent = explicit_sign.orOp(.fromStr(".@"));
     const explicit_sign = CharMask.fromStr("+-");
 
     const Error = error{InvalidToken} ||
@@ -160,6 +164,7 @@ pub const Scanner = struct {
     }
 
     fn parseAtom(self: *Scanner, atom: []const u8) Error!Token {
+        if (std.mem.eql(u8, ".", atom)) return Token.dot;
         if (parseInteger(atom)) |tok| return tok;
         if (try self.parseIdentifier(atom)) |tok| return tok;
         self.err_msg = try std.mem.print(&self.err_buf, "Invalid token: {s}", .{atom});
@@ -167,9 +172,36 @@ pub const Scanner = struct {
     }
 
     fn parseIdentifier(self: *Scanner, atom: []const u8) Error!?Token {
+        return if (try self.parseIdentifier1(atom)) |tok|
+            tok
+        else if (try self.parseIdentifier3(atom)) |tok|
+            tok
+        else
+            null;
+    }
+
+    /// parse the first identifier variant: <initial> <subsequent>*
+    fn parseIdentifier1(self: *Scanner, atom: []const u8) Error!?Token {
         std.debug.assert(atom.len > 0);
         if (!ident_initial.check(atom[0])) return null;
         for (1..atom.len) |i| {
+            if (!ident_subsequent.check(atom[i])) return null;
+        }
+        const owned = try self.string_pool.intern(atom);
+        return .{ .identifier = owned };
+    }
+
+    /// parse the third identifier variant: <explicit_sign> [<sign_subsequent> <subsequent>*]
+    fn parseIdentifier3(self: *Scanner, atom: []const u8) Error!?Token {
+        std.debug.assert(atom.len > 0);
+        if (!explicit_sign.check(atom[0])) return null;
+        // case: only explicit sign
+        if (atom.len == 1) {
+            const owned = try self.string_pool.intern(atom);
+            return .{ .identifier = owned };
+        }
+        if (!sign_subsequent.check(atom[1])) return null;
+        for (2..atom.len) |i| {
             if (!ident_subsequent.check(atom[i])) return null;
         }
         const owned = try self.string_pool.intern(atom);
@@ -186,6 +218,7 @@ pub const Scanner = struct {
         } else if (atom[0] == '+') {
             pos += 1;
         }
+        if (pos == atom.len) return null;
         var num: i64 = 0;
         for (atom[pos..]) |c| {
             if (c < '0' or c > '9') return null;
@@ -250,15 +283,22 @@ pub const Parser = struct {
         while (try self.scanner.peek() != .rparen) {
             if (try self.scanner.peek() == .eof) return Error.ParseError;
 
-            car = try self.values_pool.create(self.values_alloc);
-            car.* = try self.readDatum();
+            if (try self.scanner.peek() == .dot) {
+                _ = try self.scanner.next(); // consume '.'
+                curr_val.* = try self.readDatum();
+                if (try self.scanner.peek() != .rparen) return Error.ParseError;
+                break;
+            } else {
+                car = try self.values_pool.create(self.values_alloc);
+                car.* = try self.readDatum();
 
-            cdr = try self.values_pool.create(self.values_alloc);
-            cdr.* = .nil;
+                cdr = try self.values_pool.create(self.values_alloc);
+                cdr.* = .nil;
 
-            curr_val.* = .{ .pair = .{ .car = car, .cdr = cdr } };
+                curr_val.* = .{ .pair = .{ .car = car, .cdr = cdr } };
 
-            curr_val = cdr;
+                curr_val = cdr;
+            }
         }
         // advance past rparen
         std.debug.assert(.rparen == try self.scanner.next());
